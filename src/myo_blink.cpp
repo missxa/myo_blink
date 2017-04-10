@@ -15,25 +15,22 @@
 #include <boost/optional.hpp>
 #include <chrono>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <thread>
 
-class MyoMotor
-{
+class MyoMotor {
 public:
   /*
   * Implements the service to move the motors.
   */
-  bool moveMotor(myo_blink::moveMotor::Request &req, myo_blink::moveMotor::Response &res)
-  {
-    if (req.action == "move to")
-    {
-      flexray.set(req.ganglion, req.muscle, ControlMode::Position, req.setpoint);
+  bool moveMotor(myo_blink::moveMotor::Request &req,
+                 myo_blink::moveMotor::Response &res) {
+    if (req.action == "move to") {
+      flexray.set(req.muscle, ControlMode::Position, req.setpoint);
       res.is_success = true;
-    }
-    else if (req.action == "move with")
-    {
-      flexray.set(req.ganglion, req.muscle, ControlMode::Velocity, req.setpoint);
+    } else if (req.action == "move with") {
+      flexray.set(req.muscle, ControlMode::Velocity, req.setpoint);
       res.is_success = true;
     }
     else if (req.action == "keep")
@@ -129,19 +126,24 @@ void blink(MyoMotor &myo_control)
    * than we can send them, the number here specifies how many messages to
    * buffer up before throwing some away.
    */
+
   auto numOGang_pubber = n.advertise<std_msgs::String>("/myo_blink/numberOfGanglionsConnected", 1000, true);
   auto displacement_pubber = n.advertise<std_msgs::Float32>("/myo_blink/muscles/0/sensors/displacement", 1000);
 
   std::vector<ros::Publisher> joint_pubs;
   joint_pubs.emplace_back(n.advertise<std_msgs::Float32>("/myo_blink/joints/upper/angle", 1000)); // upper joint
   joint_pubs.emplace_back(n.advertise<std_msgs::Float32>("/myo_blink/joints/lower/angle", 1000)); //lower joint
-  
 
-  std::vector<ros::Publisher> muscle_pubs;
-  for (int i = 0; i < 4; ++i)
-  {
-    muscle_pubs.emplace_back(n.advertise<myo_blink::muscleState>(
-        std::string{ "/myo_blink/muscles/" } + std::to_string(i) + "/sensors", 1000, true));
+
+  std::map<std::string, ros::Publisher> muscle_pubs;
+  std::vector<std::string> motorNames = myo_control.flexray.get_muscle_names();
+
+  for (auto &name : motorNames) {
+    muscle_pubs.emplace(
+        name,
+        n.advertise<myo_blink::muscleState>(std::string{"/myo_blink/muscles/"} +
+                                                name + "/sensors",
+                                            1000, true));
   }
 
 
@@ -151,7 +153,8 @@ void blink(MyoMotor &myo_control)
   * convenient to call them from the command line:
   * rosservice call /myo_blink/setup /myo_blink/<TAB>- will autocomplete*
   */
-  auto moveMotor_service = n.advertiseService("/myo_blink/move", &MyoMotor::moveMotor, &myo_control);
+  auto moveMotor_service =
+      n.advertiseService("/myo_blink/move", &MyoMotor::moveMotor, &myo_control);
   /*
   * The actual flexrayusbinterface. It resides in the ROS package
   * flexrayusbinterface. If you look into both the CMakeLists.txt and
@@ -174,7 +177,9 @@ void blink(MyoMotor &myo_control)
   * We are 'stuffing' the message with data
   */
   std::stringstream ss;
-  ss << "We currently have " << myo_control.flexray.connected_ganglions().count() << " ganglia connected.";
+  ss << "We currently have "
+     << myo_control.flexray.connected_ganglions().count()
+     << " ganglia connected.";
   msg.data = ss.str();
 
   ROS_INFO("%s", msg.data.c_str());
@@ -191,17 +196,15 @@ void blink(MyoMotor &myo_control)
   * This while loop uses 'ros::ok()' to check if ROS/roscore is still running
   * and ctrl-c hasn't been pressed on this node.
   */
-  while (ros::ok())
-  {
+  while (ros::ok()) {
     /*
     * Access the motor connected on SPI 0 at ganglion 0
     */
     myo_blink::muscleState msg_state;
     std_msgs::Float32 angle;
 
-    for (int i = 0; i < 4; ++i)
-    {
-      myo_control.flexray.read_muscle(0, i).match(
+    for (auto &name : motorNames) {
+      myo_control.flexray.read_muscle(name).match(
           [&](muscleState_t &state) {
             msg_state.elasticDisplacement = state.tendonDisplacement;
             msg_state.contractileDisplacement = -1;//state.actuatorPos - myo_control.offset[i];
@@ -209,12 +212,13 @@ void blink(MyoMotor &myo_control)
             msg_state.actuatorVel = state.actuatorVel;
             msg_state.actuatorPos = state.actuatorPos;
             msg_state.jointPos = state.jointPos;
-            muscle_pubs[i].publish(msg_state);
-            if (i==0 || i==1)
-            {
-              angle.data = state.jointPos;
-              joint_pubs[i].publish(angle);
-            }
+            muscle_pubs.at(name).publish(msg_state);
+            ROS_INFO_STREAM(name);
+//            if (name=="0" || name=="1")
+//            {
+//              angle.data = state.jointPos;
+//              joint_pubs[i].publish(angle);
+//            }
           },
           [](FlexRayHardwareInterface::ReadError) {});
     }
@@ -232,8 +236,7 @@ void blink(MyoMotor &myo_control)
  * This tutorial demonstrates simple sending of messages over the ROS
  * system.
  */
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
   /**
    * The ros::init() function needs to see argc and argv so that it can perform
    * any ROS arguments and name remapping that were provided at the command
@@ -257,13 +260,12 @@ int main(int argc, char **argv)
   */
   ros::NodeHandle nh;
   std::string bridge_description;
-  if (!nh.getParam("/flex_bridge", bridge_description))
-  {
-    ROS_ERROR_STREAM("Please provide an ftdi device in ros parameter /myo_blink/ftdi_id");
+  if (!nh.getParam("/flex_bridge", bridge_description)) {
+    ROS_ERROR_STREAM(
+        "Please provide an ftdi device in ros parameter /myo_blink/ftdi_id");
     return 1;
   }
-  try
-  {
+  try {
     auto node = YAML::Load(bridge_description);
     ROS_INFO_STREAM("Description parsed");
     node = node["FlexRay"];
@@ -277,22 +279,21 @@ int main(int argc, char **argv)
                      MyoMotor motor{ std::move(flex) };
                      motor.minForce = node["_SoftSpring"]["constant"].as<double>();
                      ROS_INFO_STREAM("Minimum force to apply to the motor: " << motor.minForce);
-                     
                      intitialize(motor);
                      blink(motor);
                      return false;
                    },
                    [&](std::pair<FlexRayBus, FtResult> &result) {
-                     ROS_ERROR_STREAM("Could not connect to the myo motor: " << result.second.str());
+                     ROS_ERROR_STREAM("Could not connect to the myo motor: "
+                                      << result.second.str());
                      fbus = std::move(result.first);
                      return true;
                    }))
       ;
-      
-  }
-  catch (YAML::Exception e)
-  {
-    ROS_ERROR_STREAM("Error in /flex_bridge[" << e.mark.pos << "]:" << e.mark.line << ":" << e.mark.column << ": "
-                                              << e.msg);
+
+  } catch (YAML::Exception e) {
+    ROS_ERROR_STREAM("Error in /flex_bridge["
+                     << e.mark.pos << "]:" << e.mark.line << ":"
+                     << e.mark.column << ": " << e.msg);
   }
 }
